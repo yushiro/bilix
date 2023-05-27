@@ -12,12 +12,15 @@ from bilix.utils import legal_title
 from bilix.exception import APIError, APIResourceError, APIUnsupportedError
 import hashlib
 import time
+from . import jsondb
 
 dft_client_settings = {
     'headers': {'user-agent': 'PostmanRuntime/7.29.0', 'referer': 'https://www.bilibili.com'},
     'cookies': {'CURRENT_FNVAL': '4048'},
     'http2': True
 }
+
+
 
 
 @raise_api_error
@@ -181,14 +184,19 @@ async def get_up_info(client: httpx.AsyncClient, url_or_mid: str, pn=1, ps=30, o
     else:
         mid = url_or_mid
 
-    params = {"mid": mid, "order": order, "ps": ps, "pn": pn, "keyword": quote(keyword)}
+    params = {"mid": mid, "order": order, "ps": ps, "pn": pn, "keyword": quote("" if keyword is None else keyword)}
     await _add_sign(client, params)
 
     res = await req_retry(client, "https://api.bilibili.com/x/space/wbi/arc/search", params=params)
     info = json.loads(res.text)
     up_name = info["data"]["list"]["vlist"][0]["author"]
     total_size = info["data"]["page"]["count"]
-    bv_ids = [i["bvid"] for i in info["data"]["list"]["vlist"]]
+    # bv_ids = [i["bvid"] for i in info["data"]["list"]["vlist"]]
+    bv_ids = []
+    for i in info["data"]["list"]["vlist"]:
+        data2save = {'author':i["author"],'created':i["created"],'description':i["description"],'length':i["length"],'title':i["title"],'bvid':i["bvid"],'isDownloaded':False,'localFilename':""}
+        if(not jsondb.check_and_save_key(i["bvid"],data2save)):
+            bv_ids.append(i["bvid"])
     return up_name, total_size, bv_ids
 
 
@@ -322,6 +330,7 @@ class VideoInfo(BaseModel):
     bvid: str = None
     dash: Dash = None
     other: List[Media] = None  # flv, mp4
+    desc: str = None
 
     @staticmethod
     def parse_html(url, html: str):
@@ -335,6 +344,7 @@ class VideoInfo(BaseModel):
         if 'videoData' in init_info:  # bv视频
             status = Status(**init_info['videoData']['stat'])
             bvid = init_info['bvid']
+            desc = init_info['videoData']['desc']
             aid = init_info['aid']
             (p, cid), = init_info['cidMap'][bvid]['cids'].items()
             p = int(p) - 1
@@ -385,7 +395,7 @@ class VideoInfo(BaseModel):
             img_url = 'http:' + img_url.split('@')[0]
         # construct data
         video_info = VideoInfo(title=title, h1_title=h1_title, aid=aid, cid=cid, status=status,
-                               p=p, pages=pages, img_url=img_url, bvid=bvid, dash=dash, other=other)
+                               p=p, pages=pages, img_url=img_url, bvid=bvid, dash=dash, other=other,desc=desc)
         return video_info
 
 

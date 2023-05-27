@@ -14,6 +14,7 @@ from bilix.download.utils import req_retry, path_check
 from bilix.exception import HandleMethodError, APIUnsupportedError, APIResourceError, APIError
 from bilix.cli.assign import kwargs_filter, auto_assemble
 from bilix import ffmpeg
+from . import jsondb
 
 from danmakuC.bilibili import proto2ass
 
@@ -270,16 +271,19 @@ class DownloaderBilibili(BaseDownloaderPart):
         ps = 30
         num = min(ps, num)
         _, _, bvids = await api.get_up_info(self.client, url_or_mid, pn, ps, order, keyword)
+        # self.logger.warning(bvids)
         bvids = bvids[:num]
+        
         func = self.get_series if series else self.get_video
+        # func = self.get_video
         # noinspection PyArgumentList
         await asyncio.gather(
-            *[func(f'https://www.bilibili.com/video/{bv}', path=path, quality=quality, codec=codec,
+            *[func(f'https://www.bilibili.com/video/{bv}',bvid=f"{bv}", path=path, quality=quality, codec=codec,
                    image=image, subtitle=subtitle, dm=dm, only_audio=only_audio) for bv in bvids])
 
     async def get_series(self, url: str, path=Path('.'),
                          quality: Union[str, int] = 0, image=False, subtitle=False,
-                         dm=False, only_audio=False, p_range: Sequence[int] = None, codec: str = ''):
+                         dm=False, only_audio=False, p_range: Sequence[int] = None, codec: str = '', bvid: str = ''):
         """
         下载某个系列（包括up发布的多p投稿，动画，电视剧，电影等）的所有视频。只有一个视频的情况下仍然可用该方法
         :cli: short: s
@@ -294,6 +298,7 @@ class DownloaderBilibili(BaseDownloaderPart):
         :param codec: 视频编码（可通过info获取）
         :return:
         """
+        # self.logger.warning(f"series {bvid}")
         try:
             async with self.api_sema:
                 video_info = await api.get_video_info(self.client, url)
@@ -305,7 +310,7 @@ class DownloaderBilibili(BaseDownloaderPart):
         cors = [self.get_video(p.p_url, path=path,
                                quality=quality, image=image, subtitle=subtitle, dm=dm,
                                only_audio=only_audio, codec=codec,
-                               video_info=video_info if idx == video_info.p else None)
+                               video_info=video_info if idx == video_info.p else None, bvid=bvid)
                 for idx, p in enumerate(video_info.pages)]
         if p_range:
             cors = cors_slice(cors, p_range)
@@ -313,7 +318,7 @@ class DownloaderBilibili(BaseDownloaderPart):
 
     async def get_video(self, url: str, path=Path('.'),
                         quality: Union[str, int] = 0, image=False, subtitle=False, dm=False, only_audio=False,
-                        codec: str = '', time_range: Tuple[int, int] = None, video_info: api.VideoInfo = None):
+                        codec: str = '', time_range: Tuple[int, int] = None, video_info: api.VideoInfo = None, bvid: str =''):
         """
         下载单个视频
         :cli: short: v
@@ -330,11 +335,18 @@ class DownloaderBilibili(BaseDownloaderPart):
         :return:
         """
         async with self.v_sema:
+            localdata = jsondb.get_key(bvid)
+            # self.logger.warning(f"get_video {bvid}=>{localdata}")
+            if localdata:
+                if(localdata["isDownloaded"] == True):
+                    self.logger.info(f'[cyan]已完成1[/cyan] {localdata["localFilename"]}')
+                    return
             if not video_info:
                 try:
                     video_info = await api.get_video_info(self.client, url)
                 except (APIResourceError, APIUnsupportedError) as e:
                     return self.logger.warning(e)
+            # self.logger.info(f"{video_info}")
             p_name = legal_title(video_info.pages[video_info.p].p_name)
             task_name = legal_title(video_info.h1_title, p_name)
             # if title is too long, use p_name as base_name
@@ -343,6 +355,12 @@ class DownloaderBilibili(BaseDownloaderPart):
             media_name = base_name if not time_range else legal_title(base_name, *map(t2s, time_range))
             media_cors = []
             task_id = await self.progress.add_task(total=None, description=task_name)
+            # save description to file
+            descExists, descPath = path_check(path / f'{media_name}.txt')
+            if not descExists:
+                with open(descPath, 'w', encoding='utf-8') as f:
+                    f.write(video_info.desc)
+
             if video_info.dash:
                 try:  # choose video quality
                     video, audio = video_info.dash.choose_quality(quality, codec)
@@ -358,7 +376,11 @@ class DownloaderBilibili(BaseDownloaderPart):
                     elif audio and not only_audio:
                         exists, media_path = path_check(path / f'{media_name}.mp4')
                         if exists:
-                            self.logger.info(f'[green]已存在[/green] {media_path.name}')
+                            self.logger.info(f'[green]已存在2[/green] {media_path.name}')
+                            if localdata:
+                                localdata["localFilename"] = f'{media_name}.mp4'
+                                localdata["isDownloaded"] = True
+                                jsondb.update_key(bvid, localdata)
                         else:
                             tmp.append((video, path / f'{media_name}-v'))
                             tmp.append((audio, path / f'{media_name}-a'))
@@ -435,6 +457,10 @@ class DownloaderBilibili(BaseDownloaderPart):
         if upper := self.progress.tasks[task_id].fields.get('upper', None):
             await upper(path_lst, media_path)
             self.logger.info(f'[cyan]已完成[/cyan] {media_path.name}')
+            if localdata:
+                localdata["localFilename"] = f'{media_name}.mp4'
+                localdata["isDownloaded"] = True
+                jsondb.update_key(bvid, localdata)
         await self.progress.update(task_id, visible=False)
 
     @staticmethod
